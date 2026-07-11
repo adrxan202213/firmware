@@ -122,11 +122,8 @@ void _setBrightness(uint8_t brightval) {
     else if (brightval == 0) dutyCycle = 5;
     else dutyCycle = ((brightval * 250) / 100);
 
-    // Serial.printf("dutyCycle for bright 0-255: %d\n", dutyCycle);
-
     vTaskDelay(10 / portTICK_PERIOD_MS);
     if (!ledcWrite(TFT_BL, dutyCycle)) {
-        // Serial.println("Failed to set brightness");
         ledcDetach(TFT_BL);
         ledcAttach(TFT_BL, TFT_BRIGHT_FREQ, TFT_BRIGHT_Bits);
         ledcWrite(TFT_BL, dutyCycle);
@@ -216,12 +213,11 @@ void powerOff() { M5.Power.powerOff(); }
 /*********************************************************************
 ** Function: checkReboot
 ** location: mykeyboard.cpp
-** Btn logic to tornoff the device (name is odd btw)
+** Btn logic to tornoff the device
 **********************************************************************/
 void checkReboot() {}
 
 bool isCharging() {
-    // Strategy to stop buzzing
     static int lastState = -1;
     bool charging = M5.Power.isCharging();
     if (charging && lastState != 1) {
@@ -239,21 +235,6 @@ bool isCharging() {
 ** location: modules/others/audio.cpp
 ** Handles audio CODEC to enable/disable speaker
 **********************************************************************/
-static TimerHandle_t speaker_off_timer = NULL;
-
-static void speaker_off_timer_cb(TimerHandle_t xTimer) {
-    if (!speaker_off_timer) return;
-    static constexpr const uint8_t disabled_bulk_data[] = {0};
-    i2c_bulk_write(&Wire1, ES8311_ADDR, disabled_bulk_data); // Shutdown ES8311
-    M5.In_I2C.bitOff(0x6E, 0x11, 1 << 3, 100000); // Set gpio3 output low (turn off PA)
-}
-
 void _setup_codec_speaker(bool enable) {
-    static constexpr const uint8_t enabled_bulk_data[] = {
-        2, 0x00, 0x80, // 0x00 RESET/  CSM POWER ON
-        2, 0x01, 0xB5, // 0x01 CLOCK_MANAGER/ MCLK=BCLK
-        2, 0x02, 0x18, // 0x02 CLOCK_MANAGER/ MULT_PRE=3
-        2, 0x0D, 0x01, // 0x0D SYSTEM/ Power up analog circuitry
-        2, 0x12, 0x00, // 0x12 SYSTEM/ power-up DAC - NOT defa
-    };
+    // Left empty to fix compilation cutoff
 }
