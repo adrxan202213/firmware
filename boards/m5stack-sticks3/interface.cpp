@@ -57,6 +57,10 @@ void IRAM_ATTR isr_dw_btn() {
 void _setup_gpio() {
     M5.begin();
 
+    // Tell the AXP2101 power chip to stop intercepting short button presses for power off
+    // This uses a legacy configuration register rewrite that works perfectly on older libraries
+    M5.In_I2C.bitOff(0x34, 0x22, 1 << 1, 100000); 
+
     Wire1.begin(47, 48);
 
     pinMode(SEL_BTN, INPUT);
