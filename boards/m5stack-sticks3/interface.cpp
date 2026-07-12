@@ -56,9 +56,6 @@ void IRAM_ATTR isr_dw_btn() {
 ***************************************************************************************/
 void _setup_gpio() {
     M5.begin();
-    
-    // Disable AXP2101 automatic software-level screen blanking / power off
-    M5.Power.setPowerButtonAction(m5::Power_Class::action_none);
 
     Wire1.begin(47, 48);
 
