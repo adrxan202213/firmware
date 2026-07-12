@@ -56,11 +56,6 @@ void IRAM_ATTR isr_dw_btn() {
 ***************************************************************************************/
 void _setup_gpio() {
     M5.begin();
-
-    // Tell the AXP2101 power chip to stop intercepting short button presses for power off
-    // This uses a legacy configuration register rewrite that works perfectly on older libraries
-    M5.In_I2C.bitOff(0x34, 0x22, 1 << 1, 100000); 
-
     Wire1.begin(47, 48);
 
     pinMode(SEL_BTN, INPUT);
@@ -69,7 +64,6 @@ void _setup_gpio() {
     M5.Power.setExtOutput(false); // It buzzes it ext power is turned on
 
     /*
-
 | Device  | SCK   | MISO  | MOSI  | CS    | GDO0/CE   |
 | ---     | :---: | :---: | :---: | :---: | :---:     |
 | SD Card | 5     | 4     | 6     | 7     | ---       |
@@ -110,7 +104,7 @@ void _post_setup_gpio() {
 }
 
 /*********************************************************************
-** Function: _setBrightness
+** Function: setBrightness
 ** location: settings.cpp
 ** set brightness value
 **********************************************************************/
@@ -123,8 +117,11 @@ void _setBrightness(uint8_t brightval) {
     else if (brightval == 0) dutyCycle = 5;
     else dutyCycle = ((brightval * 250) / 100);
 
+    // Serial.printf("dutyCycle for bright 0-255: %d\n", dutyCycle);
+
     vTaskDelay(10 / portTICK_PERIOD_MS);
     if (!ledcWrite(TFT_BL, dutyCycle)) {
+        // Serial.println("Failed to set brightness");
         ledcDetach(TFT_BL);
         ledcAttach(TFT_BL, TFT_BRIGHT_FREQ, TFT_BRIGHT_Bits);
         ledcWrite(TFT_BL, dutyCycle);
@@ -144,64 +141,46 @@ int getBattery() {
 /*********************************************************************
 ** Function: InputHandler
 ** Handles the variables PrevPress, NextPress, SelPress, AnyKeyPress and EscPress
+**
+** EDITED: SEL_BTN and DW_BTN (the physical "power" button) are now simple,
+** single-action Left/Right navigation buttons. Double-click / long-press /
+** Esc logic on DW_BTN has been removed so that button can never trigger a
+** back/esc/power action from here - short click only, edge-triggered so it
+** fires once per physical press.
 **********************************************************************/
 void InputHandler(void) {
     static unsigned long tm = 0;
-    static bool dwLongFired = false;
+    static bool dw_was_down = false;
     unsigned long now = millis();
-    
-    // Read the power button hardware state via M5Unified
-    M5.update();
-
     if (now - tm < 200 && !LongPress) return;
     if (!wakeUpScreen()) AnyKeyPress = true;
     else return;
 
     bool selPressed = (digitalRead(SEL_BTN) == BTN_ACT);
     bool dwPressed = dw_is_down;
-    bool dwWaiting = dw_waiting;
-    bool dwDoubleReady = dw_double_ready;
-    unsigned long dwPressStart = dw_press_ms;
-    unsigned long dwFirstRelease = dw_first_release_ms;
-    
-    // Check if the physical power button was pressed
-    bool pwrPressed = M5.BtnPWR.wasPressed();
 
-    AnyKeyPress = selPressed || dwPressed || dwWaiting || dwDoubleReady || pwrPressed;
+    AnyKeyPress = selPressed || dwPressed;
 
-    // Check if power button was clicked, map directly to Left (PrevPress)
-    if (pwrPressed) {
-        PrevPress = true;
-        tm = now;
-    }
-
+    // SEL_BTN -> Right
     if (selPressed) {
-        SelPress = true;
+        NextPress = true;
         tm = now;
-    }
-    if (dwPressed) {
-        if (!dwLongFired && (now - dwPressStart) > kDwLongPressMs) {
-            EscPress = true;
-            dwLongFired = true;
-            dw_waiting = false;
-            dw_double_ready = false;
-            dw_long_seen = true;
-            tm = now;
-        }
-    } else if (dwLongFired) {
-        dwLongFired = false;
     }
 
-    if (dwDoubleReady) {
+    // DW_BTN (physical power button) -> Left. Edge-triggered on press so it
+    // fires once per click, regardless of how long it's held. No Esc/back
+    // and no power-off path is reachable from this button anymore.
+    if (dwPressed && !dw_was_down) {
         PrevPress = true;
-        dw_double_ready = false;
-        dw_waiting = false;
-        tm = now;
-    } else if (dwWaiting && !dwPressed && (now - dwFirstRelease) > kDwDoublePressWindowMs) {
-        NextPress = true;
-        dw_waiting = false;
         tm = now;
     }
+    dw_was_down = dwPressed;
+
+    // Housekeeping: clear the click-timing state machine so nothing stale
+    // lingers and no double-click/long-press ever fires from the ISR side.
+    dw_waiting = false;
+    dw_double_ready = false;
+    dw_long_seen = false;
 }
 
 /*********************************************************************
@@ -214,11 +193,49 @@ void powerOff() { M5.Power.powerOff(); }
 /*********************************************************************
 ** Function: checkReboot
 ** location: mykeyboard.cpp
-** Btn logic to tornoff the device
+** S3-specific deliberate shutdown: hold DW_BTN (physical power button)
+** for 3 seconds with an on-screen countdown to power off. Short clicks
+** are unaffected - this only escalates into a shutdown if the button
+** is still held past 500ms and continues to 3s. Uses M5.Power.powerOff()
+** (correct call for this board's PMIC) instead of the StickCPlus2's
+** raw esp_deep_sleep_start() approach, which doesn't apply here.
 **********************************************************************/
-void checkReboot() {}
+void checkReboot() {
+    if (digitalRead(DW_BTN) != BTN_ACT) return;
+
+    uint32_t time_count = millis();
+    int countDown = 0;
+
+    while (digitalRead(DW_BTN) == BTN_ACT) {
+        if (millis() - time_count > 500) {
+            if (countDown == 0) {
+                int textWidth = tft.textWidth("PWR OFF IN 3/3", 1);
+                tft.fillRect(60, 7, textWidth, 18, bruceConfig.bgColor);
+            }
+            tft.setCursor(60, 12);
+            tft.setTextSize(1);
+            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+            countDown = (millis() - time_count) / 1000 + 1;
+
+            if (countDown > 3) {
+                powerOff(); // M5.Power.powerOff() - defined above in this file
+                return;
+            }
+
+            tft.printf(" PWR OFF IN %d/3\n", countDown);
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+    }
+
+    // Released before reaching 3s - just a normal click, clean up the countdown text
+    if (millis() - time_count > 500) {
+        tft.fillRect(60, 12, 16 * LW, tft.fontHeight(1), bruceConfig.bgColor);
+        drawStatusBar();
+    }
+}
 
 bool isCharging() {
+    // Strategy to stop buzzing
     static int lastState = -1;
     bool charging = M5.Power.isCharging();
     if (charging && lastState != 1) {
@@ -236,6 +253,79 @@ bool isCharging() {
 ** location: modules/others/audio.cpp
 ** Handles audio CODEC to enable/disable speaker
 **********************************************************************/
+static TimerHandle_t speaker_off_timer = NULL;
+
+static void speaker_off_timer_cb(TimerHandle_t xTimer) {
+    if (!speaker_off_timer) return;
+    static constexpr const uint8_t disabled_bulk_data[] = {0};
+    i2c_bulk_write(&Wire1, ES8311_ADDR, disabled_bulk_data); // Shutdown ES8311
+    M5.In_I2C.bitOff(0x6E, 0x11, 1 << 3, 100000); // Set gpio3 output low (turn off PA)
+}
+
 void _setup_codec_speaker(bool enable) {
-    // Left empty to fix compilation cutoff
+
+    static constexpr const uint8_t enabled_bulk_data[] = {
+        2, 0x00, 0x80, // 0x00 RESET/  CSM POWER ON
+        2, 0x01, 0xB5, // 0x01 CLOCK_MANAGER/ MCLK=BCLK
+        2, 0x02, 0x18, // 0x02 CLOCK_MANAGER/ MULT_PRE=3
+        2, 0x0D, 0x01, // 0x0D SYSTEM/ Power up analog circuitry
+        2, 0x12, 0x00, // 0x12 SYSTEM/ power-up DAC - NOT default
+        2, 0x13, 0x10, // 0x13 SYSTEM/ Enable output to HP drive - NOT default
+        2, 0x32, 0xBF, // 0x32 DAC/ DAC volume (0xBF == +-0 dB )
+        2, 0x37, 0x08, // 0x37 DAC/ Bypass DAC equalizer - NOT default
+        0
+    };
+
+    if (speaker_off_timer == NULL) {
+        speaker_off_timer = xTimerCreate("SpkOffTimer", pdMS_TO_TICKS(100), pdFALSE, (void *)0, speaker_off_timer_cb);
+    }
+
+    if (enable) {
+        if (speaker_off_timer != NULL && xTimerIsTimerActive(speaker_off_timer)) {
+            xTimerStop(speaker_off_timer, 0); // Cancel pending shutdown
+        } else {
+            i2c_bulk_write(&Wire1, ES8311_ADDR, enabled_bulk_data);
+            M5.In_I2C.bitOn(0x6E, 0x11, 1 << 3, 100000); // Set gpio3 output high (turn on PA)
+        }
+    } else {
+        if (speaker_off_timer != NULL) {
+            xTimerReset(speaker_off_timer, 0); // Start/reset shutdown timeout for 100ms
+        }
+    }
+}
+
+/*********************************************************************
+** Function: _setup_codec_mic
+** location: modules/others/mic.cpp
+** Handles audio CODEC to enable/disable microphone
+**********************************************************************/
+void _setup_codec_mic(bool enable) {
+    // Set microfone pin for ADV
+    mic_bclk_pin = (gpio_num_t)17;
+
+    static constexpr const uint8_t enabled_bulk_data[] = {
+        2, 0x00, 0x80, // 0x00 RESET/  CSM POWER ON
+        2, 0x01, 0xBA, // 0x01 CLOCK_MANAGER/ MCLK=BCLK
+        2, 0x02, 0x18, // 0x02 CLOCK_MANAGER/ MULT_PRE=3
+        2, 0x0D, 0x01, // 0x0D SYSTEM/ Power up analog circuitry
+        2, 0x0E, 0x02, // 0x0E SYSTEM/ : Enable analog PGA, enable ADC modulator
+        2, 0x14, 0x10, // ES8311_ADC_REG14 : select Mic1p-Mic1n / PGA GAIN (minimum)
+        2, 0x17, 0xBF, // ES8311_ADC_REG17 : ADC_VOLUME 0xBF == +- 0 dB
+        2, 0x1C, 0x6A, // ES8311_ADC_REG1C : ADC Equalizer bypass, cancel DC offset in digital domain
+        0
+    };
+    static constexpr const uint8_t disabled_bulk_data[] = {
+        2,
+        0x0D,
+        0xFC, // 0x0D SYSTEM/ Power down analog circuitry
+        2,
+        0x0E,
+        0x6A, // 0x0E SYSTEM
+        2,
+        0x00,
+        0x00, // 0x00 RESET/  CSM POWER DOWN
+        0
+    };
+
+    i2c_bulk_write(&Wire1, ES8311_ADDR, enable ? enabled_bulk_data : disabled_bulk_data);
 }
